@@ -12,6 +12,12 @@ import (
 	"sync"
 )
 
+var (
+	workers   = flag.Int("n", 4, "parallel connections")
+	chunkSize = flag.Int("c", 100*1024, "chunk size")
+	debug     = flag.Bool("d", false, "debug")
+)
+
 type chunk struct {
 	offset int64
 	size   int64
@@ -42,8 +48,10 @@ func newDownload(url string) (*download, error) {
 }
 
 func (d *download) chunkFeeder(out chan<- *chunk) {
-	log.Printf("Feeder is running")
-	size := int64(100 * 1024)
+	if *debug {
+		log.Printf("Feeder is running")
+	}
+	size := int64(*chunkSize)
 	for i := int64(0); ; i++ {
 		if i*size >= d.size {
 			break
@@ -55,16 +63,22 @@ func (d *download) chunkFeeder(out chan<- *chunk) {
 			offset: i * size,
 			size:   size}
 	}
-	log.Printf("Feeder is closing")
+	if *debug {
+		log.Printf("Feeder is closing")
+	}
 	close(out)
 }
 
 func (d *download) chunkWorker(n int, in <-chan *chunk, out chan<- *chunk) {
-	log.Println("Started chunk worker", n)
+	if *debug {
+		log.Println("Started chunk worker", n)
+	}
 	defer d.wg.Done()
 
 	for ch := range in {
-		log.Printf("Chunk worker %d fetching chunk %d (%d)\n", n, ch.offset, ch.size)
+		if *debug {
+			log.Printf("Chunk worker %d fetching chunk %d (%d)\n", n, ch.offset, ch.size)
+		}
 		body, err := fetch(d.url, ch.offset, ch.size)
 		if err != nil {
 			log.Fatal(err)
@@ -76,12 +90,16 @@ func (d *download) chunkWorker(n int, in <-chan *chunk, out chan<- *chunk) {
 		out <- ch
 	}
 
-	log.Println("Finishing chunk worker", n)
+	if *debug {
+		log.Println("Finishing chunk worker", n)
+	}
 }
 
 func (d *download) chunkWriter(in <-chan *chunk) {
 	for ch := range in {
-		log.Printf("Chunk writer processing completed chunk %d (%d)\n", ch.offset, len(ch.buffer.Bytes()))
+		if *debug {
+			log.Printf("Chunk writer processing completed chunk %d (%d)\n", ch.offset, len(ch.buffer.Bytes()))
+		}
 		d.readyChunks[ch.offset] = ch
 
 		for {
@@ -103,13 +121,15 @@ func start() error {
 		return err
 	}
 
-	log.Println("Size", d.size)
+	if *debug {
+		log.Println("Size", d.size)
+	}
 
-	ich := make(chan *chunk, 1)
-	och := make(chan *chunk, 1)
+	ich := make(chan *chunk, 2)
+	och := make(chan *chunk, 2)
 
 	go d.chunkFeeder(ich)
-	for i := 0; i < 32; i++ {
+	for i := 0; i < *workers; i++ {
 		d.wg.Add(1)
 		go d.chunkWorker(i, ich, och)
 	}
@@ -124,15 +144,6 @@ func start() error {
 	d.chunkWriter(och)
 	log.Printf("Chunk writer finished")
 
-	/*
-		body, err := fetch(url, 0, 12)
-		if err != nil {
-			return err
-		}
-
-		defer body.Close()
-		io.Copy(os.Stdout, body)
-	*/
 	return nil
 }
 
