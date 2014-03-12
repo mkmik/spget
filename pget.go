@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -22,7 +23,7 @@ var (
 type chunk struct {
 	offset int64
 	size   int64
-	reader io.Reader
+	reader io.ReadCloser
 }
 
 type download struct {
@@ -70,6 +71,15 @@ func (d *download) chunkFeeder(out chan<- *chunk) {
 	close(out)
 }
 
+type FileDeleter struct {
+	*os.File
+}
+
+func (f FileDeleter) Close() error {
+	os.Remove(f.Name())
+	return f.File.Close()
+}
+
 // chunkWorker task chunks from the in channel, fetches the chunk from
 // the http resource into the buffer in the chunk structure.
 // The completed chunk is then sent to the out channel.
@@ -89,11 +99,31 @@ func (d *download) chunkWorker(n int, in <-chan *chunk, out chan<- *chunk) {
 		}
 
 		// TODO(mkm) check errors
-		var buffer bytes.Buffer
-		ch.reader = &buffer
-		io.Copy(&buffer, body)
-		body.Close()
-		out <- ch
+		func() {
+			var writer io.Writer
+			if *output == "-" {
+				var buffer bytes.Buffer
+				writer = &buffer
+				ch.reader = ioutil.NopCloser(&buffer)
+			} else {
+				f, err := os.Create(fmt.Sprintf("%s.chunk-%d", *output, ch.offset))
+				if err != nil {
+					log.Fatalf("Cannot create temp file for chunk for offset %d, %s", ch.offset, err)
+				}
+				writer = f
+				ch.reader = FileDeleter{f}
+				defer func() {
+					f.Seek(0, 0)
+				}()
+			}
+			io.Copy(writer, body)
+			body.Close()
+
+			// ensure that other deferreds get called before we enqueue it.
+			defer func() {
+				out <- ch
+			}()
+		}()
 	}
 
 	if *debug {
@@ -117,7 +147,9 @@ func (d *download) chunkWriter(in <-chan *chunk) {
 
 		for {
 			if c, ok := readyChunks[outPos]; ok {
+				// TODO(mkm) check for errors
 				io.Copy(d.writer, c.reader)
+				c.reader.Close()
 				outPos += c.size
 			} else {
 				break
