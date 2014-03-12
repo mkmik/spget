@@ -22,7 +22,7 @@ var (
 type chunk struct {
 	offset int64
 	size   int64
-	buffer bytes.Buffer
+	reader io.Reader
 }
 
 type download struct {
@@ -89,7 +89,9 @@ func (d *download) chunkWorker(n int, in <-chan *chunk, out chan<- *chunk) {
 		}
 
 		// TODO(mkm) check errors
-		io.Copy(&ch.buffer, body)
+		var buffer bytes.Buffer
+		ch.reader = &buffer
+		io.Copy(&buffer, body)
 		body.Close()
 		out <- ch
 	}
@@ -109,13 +111,13 @@ func (d *download) chunkWriter(in <-chan *chunk) {
 
 	for ch := range in {
 		if *debug {
-			log.Printf("Chunk writer processing completed chunk %d (%d)\n", ch.offset, len(ch.buffer.Bytes()))
+			log.Printf("Chunk writer processing completed chunk %d (%d)\n", ch.offset, ch.size)
 		}
 		readyChunks[ch.offset] = ch
 
 		for {
 			if c, ok := readyChunks[outPos]; ok {
-				io.Copy(d.writer, &c.buffer)
+				io.Copy(d.writer, c.reader)
 				outPos += c.size
 			} else {
 				break
