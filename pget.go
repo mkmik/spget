@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -91,22 +93,46 @@ func (d *download) chunkWorker(n int, in <-chan *chunk, out chan<- *chunk) {
 		if *debug {
 			log.Printf("Chunk worker %d fetching chunk %d (%d)\n", n, ch.offset, ch.size)
 		}
-		body, err := fetch(d.url, ch.offset, ch.size)
-		if err != nil {
-			log.Fatal(err)
-		}
 
-		// TODO(mkm) check errors
 		basename := *output
 		if *output == "-" {
 			basename = "/tmp/pget.tmp"
 		}
 
-		f, err := os.Create(fmt.Sprintf("%s.chunk-%d", basename, ch.offset))
-		if err != nil {
-			log.Fatalf("Cannot create temp file for chunk for offset %d, %s", ch.offset, err)
+		offset := ch.offset
+		size := ch.size
+
+		var f *os.File
+		var err error
+
+		tmpName := fmt.Sprintf("%s.chunk-%d", basename, ch.offset)
+		if st, err := os.Stat(tmpName); os.IsNotExist(err) {
+			f, err = os.Create(tmpName)
+			if err != nil {
+				log.Fatalf("Cannot create temp file for chunk for offset %d, %s", ch.offset, err)
+			}
+		} else if err == nil {
+			f, err = os.OpenFile(tmpName, os.O_APPEND, 0)
+			if err != nil {
+				log.Fatalf("Cannot open temp file for appending chunk for offset %d, %s", ch.offset, err)
+			}
+			offset += st.Size()
+			size -= st.Size()
+		} else {
+			log.Fatal("Got some error", err)
 		}
 
+		var body io.ReadCloser
+		if size < 1 {
+			body = ioutil.NopCloser(&bytes.Buffer{})
+		} else {
+			body, err = fetch(d.url, offset, size)
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+
+		// TODO(mkm) check errors
 		io.Copy(f, body)
 		body.Close()
 		f.Seek(0, 0)
