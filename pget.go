@@ -23,14 +23,15 @@ var (
 type chunk struct {
 	offset int64
 	size   int64
-	reader io.ReadCloser
+	file   string
 }
 
 type download struct {
-	wg     sync.WaitGroup
-	url    string
-	size   int64
-	writer io.Writer
+	wg       sync.WaitGroup
+	url      string
+	size     int64
+	startPos int64
+	writer   io.Writer
 }
 
 func newDownload(url string) (*download, error) {
@@ -53,31 +54,35 @@ func (d *download) chunkFeeder(out chan<- *chunk) {
 	if *debug {
 		log.Printf("Feeder is running")
 	}
-	size := int64(*chunkSize)
 	for i := int64(0); ; i++ {
-		if i*size >= d.size {
+		size := int64(*chunkSize)
+		off := i * size
+
+		if off+size <= d.startPos {
+			continue
+		}
+		if d.startPos-off > 0 && d.startPos-off < size {
+			size -= d.startPos - off
+			off = d.startPos
+		}
+
+		if off >= d.size {
 			break
 		}
-		if i*size+size > d.size {
-			size = i*size + size - d.size
+		if off+size > d.size {
+			size = off + size - d.size
+		}
+		if *debug {
+			log.Printf("Enqueuing chunk %d size %d", off, size)
 		}
 		out <- &chunk{
-			offset: i * size,
+			offset: off,
 			size:   size}
 	}
 	if *debug {
 		log.Printf("Feeder is closing")
 	}
 	close(out)
-}
-
-type FileDeleter struct {
-	*os.File
-}
-
-func (f FileDeleter) Close() error {
-	os.Remove(f.Name())
-	return f.File.Close()
 }
 
 // chunkWorker task chunks from the in channel, fetches the chunk from
@@ -124,6 +129,7 @@ func (d *download) chunkWorker(n int, in <-chan *chunk, out chan<- *chunk) {
 
 		var body io.ReadCloser
 		if size < 1 {
+			//fmt.Println("Fully downloaded chunk, skipping")
 			body = ioutil.NopCloser(&bytes.Buffer{})
 		} else {
 			body, err = fetch(d.url, offset, size)
@@ -135,9 +141,9 @@ func (d *download) chunkWorker(n int, in <-chan *chunk, out chan<- *chunk) {
 		// TODO(mkm) check errors
 		io.Copy(f, body)
 		body.Close()
-		f.Seek(0, 0)
+		f.Close()
 
-		ch.reader = FileDeleter{f}
+		ch.file = tmpName
 		out <- ch
 	}
 
@@ -152,7 +158,7 @@ func (d *download) chunkWorker(n int, in <-chan *chunk, out chan<- *chunk) {
 // are delivered.
 func (d *download) chunkWriter(in <-chan *chunk) {
 	readyChunks := make(map[int64]*chunk)
-	outPos := int64(0)
+	outPos := d.startPos
 
 	for ch := range in {
 		if *debug {
@@ -163,8 +169,14 @@ func (d *download) chunkWriter(in <-chan *chunk) {
 		for {
 			if c, ok := readyChunks[outPos]; ok {
 				// TODO(mkm) check for errors
-				io.Copy(d.writer, c.reader)
-				c.reader.Close()
+				f, err := os.Open(c.file)
+				if err != nil {
+					log.Fatal(err)
+				}
+				io.Copy(d.writer, f)
+				f.Close()
+				os.Remove(c.file)
+
 				outPos += c.size
 			} else {
 				break
@@ -182,17 +194,26 @@ func start() error {
 		return err
 	}
 
+	lastPos := int64(0)
 	if *output != "-" {
-		f, err := os.Create(*output)
+		//f, err := os.Create(*output)
+		f, err := os.OpenFile(*output, os.O_RDWR|os.O_CREATE, 0666)
 		if err != nil {
 			return err
 		}
 		defer f.Close()
 		d.writer = f
+
+		lastPos, err = f.Seek(0, 2)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
+	d.startPos = lastPos
 
 	if *debug {
 		log.Println("Size", d.size)
+		log.Println("Last pos", lastPos)
 	}
 
 	ich := make(chan *chunk, 2)
