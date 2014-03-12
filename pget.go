@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
@@ -99,31 +97,22 @@ func (d *download) chunkWorker(n int, in <-chan *chunk, out chan<- *chunk) {
 		}
 
 		// TODO(mkm) check errors
-		func() {
-			var writer io.Writer
-			if *output == "-" {
-				var buffer bytes.Buffer
-				writer = &buffer
-				ch.reader = ioutil.NopCloser(&buffer)
-			} else {
-				f, err := os.Create(fmt.Sprintf("%s.chunk-%d", *output, ch.offset))
-				if err != nil {
-					log.Fatalf("Cannot create temp file for chunk for offset %d, %s", ch.offset, err)
-				}
-				writer = f
-				ch.reader = FileDeleter{f}
-				defer func() {
-					f.Seek(0, 0)
-				}()
-			}
-			io.Copy(writer, body)
-			body.Close()
+		basename := *output
+		if *output == "-" {
+			basename = "/tmp/pget.tmp"
+		}
 
-			// ensure that other deferreds get called before we enqueue it.
-			defer func() {
-				out <- ch
-			}()
-		}()
+		f, err := os.Create(fmt.Sprintf("%s.chunk-%d", basename, ch.offset))
+		if err != nil {
+			log.Fatalf("Cannot create temp file for chunk for offset %d, %s", ch.offset, err)
+		}
+
+		io.Copy(f, body)
+		body.Close()
+		f.Seek(0, 0)
+
+		ch.reader = FileDeleter{f}
+		out <- ch
 	}
 
 	if *debug {
