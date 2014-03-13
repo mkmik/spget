@@ -11,6 +11,11 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/dustin/go-humanize"
+	"github.com/rcrowley/go-metrics"
 )
 
 var (
@@ -32,6 +37,23 @@ type download struct {
 	size     int64
 	startPos int64
 	writer   io.Writer
+
+	succeeded     counter
+	downloaded    counter
+	downloadMeter metrics.Meter
+	progress      counter
+}
+
+type counter struct {
+	v int64
+}
+
+func (c *counter) add(delta int64) {
+	atomic.AddInt64(&c.v, delta)
+}
+
+func (c *counter) value() int64 {
+	return atomic.LoadInt64(&c.v)
 }
 
 func newDownload(url string) (*download, error) {
@@ -41,9 +63,10 @@ func newDownload(url string) (*download, error) {
 	}
 
 	return &download{
-		url:    url,
-		size:   size,
-		writer: os.Stdout,
+		url:           url,
+		size:          size,
+		writer:        os.Stdout,
+		downloadMeter: metrics.NewMeter(),
 	}, nil
 }
 
@@ -51,6 +74,10 @@ func newDownload(url string) (*download, error) {
 // The chunk size is determined via commandline params. The last chunk is
 // is sized accordingly.
 func (d *download) chunkFeeder(out chan<- *chunk) {
+	// when resuming a download. the chunk feeder won't emit chunks
+	// that are already been written.
+	d.succeeded.add(d.startPos)
+
 	if *debug {
 		log.Printf("Feeder is running")
 	}
@@ -132,10 +159,13 @@ func (d *download) chunkWorker(n int, in <-chan *chunk, out chan<- *chunk) {
 			//fmt.Println("Fully downloaded chunk, skipping")
 			body = ioutil.NopCloser(&bytes.Buffer{})
 		} else {
-			body, err = fetch(d.url, offset, size)
+			body, err = d.fetch(offset, size)
 			if err != nil {
 				log.Fatal(err)
 			}
+			// mark the whole chunk as succeeded
+			// even if we continued an interrupted download.
+			d.succeeded.add(ch.size)
 		}
 
 		// TODO(mkm) check errors
@@ -159,6 +189,7 @@ func (d *download) chunkWorker(n int, in <-chan *chunk, out chan<- *chunk) {
 func (d *download) chunkWriter(in <-chan *chunk) {
 	readyChunks := make(map[int64]*chunk)
 	outPos := d.startPos
+	d.progress.add(d.startPos)
 
 	for ch := range in {
 		if *debug {
@@ -168,12 +199,16 @@ func (d *download) chunkWriter(in <-chan *chunk) {
 
 		for {
 			if c, ok := readyChunks[outPos]; ok {
-				// TODO(mkm) check for errors
 				f, err := os.Open(c.file)
 				if err != nil {
 					log.Fatal(err)
 				}
-				io.Copy(d.writer, f)
+				n, err := io.Copy(d.writer, f)
+				if err != nil {
+					log.Fatal(err)
+				}
+				d.progress.add(n)
+
 				f.Close()
 				os.Remove(c.file)
 
@@ -239,11 +274,42 @@ func start() error {
 		close(och)
 	}()
 
+	done := make(chan struct{})
+	go d.showProgress(done)
+
 	// the chunk writer block until
 	// all the chunks are received, reordered and written.
 	d.chunkWriter(och)
 
+	close(done)
+	d.printProgress()
+
 	return nil
+}
+
+func (d *download) showProgress(done <-chan struct{}) {
+	d.printProgress()
+
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			d.printProgress()
+		case <-done:
+			return
+		}
+	}
+}
+
+// percentRatio returns the ration of two integers as a percentage.
+func percentRatio(a, b int64) float64 {
+	return float64(a) / float64(b) * 100.0
+}
+
+func (d *download) printProgress() {
+	fmt.Fprintf(os.Stderr, "succeeded: %.2f%%; progress: %.2f%%; downloaded: %s; rate: %s/s\n", percentRatio(d.succeeded.value(), d.size), percentRatio(d.progress.value(), d.size), humanize.Bytes(uint64(d.downloaded.value())), humanize.Bytes(uint64(d.downloadMeter.Rate1())))
 }
 
 // contentSize returns the size of the resource
@@ -266,8 +332,8 @@ func followRedirect(req *http.Request, via []*http.Request) error {
 // fetch returns a ReadCloser with the content of a
 // section of the resource found at url starting at from
 // and len long.
-func fetch(url string, from, len int64) (io.ReadCloser, error) {
-	req, err := http.NewRequest("GET", url, nil)
+func (d *download) fetch(from, len int64) (io.ReadCloser, error) {
+	req, err := http.NewRequest("GET", d.url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -289,7 +355,20 @@ func fetch(url string, from, len int64) (io.ReadCloser, error) {
 		}
 		return nil, errors.New(resp.Status)
 	}
-	return resp.Body, nil
+	return &measuringReader{resp.Body, &d.downloaded, d.downloadMeter}, nil
+}
+
+type measuringReader struct {
+	io.ReadCloser
+	*counter
+	metrics.Meter
+}
+
+func (m *measuringReader) Read(p []byte) (int, error) {
+	n, err := m.ReadCloser.Read(p)
+	m.add(int64(n))
+	m.Mark(int64(n))
+	return n, err
 }
 
 func main() {
