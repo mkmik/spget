@@ -144,21 +144,24 @@ func (d *download) chunkWorker(n int, in <-chan *chunk, out chan<- *chunk) {
 				log.Fatalf("Cannot create temp file for chunk for offset %d, %s", ch.offset, err)
 			}
 		} else if err == nil {
-			f, err = os.OpenFile(tmpName, os.O_APPEND, 0)
+			f, err = os.OpenFile(tmpName, os.O_APPEND|os.O_WRONLY, 0)
 			if err != nil {
 				log.Fatalf("Cannot open temp file for appending chunk for offset %d, %s", ch.offset, err)
 			}
 			offset += st.Size()
 			size -= st.Size()
 		} else {
-			log.Fatal("Got some error", err)
+			log.Fatal("Cannot stat ", tmpName, err)
 		}
 
 		var body io.ReadCloser
 		if size < 1 {
-			//fmt.Println("Fully downloaded chunk, skipping")
 			body = ioutil.NopCloser(&bytes.Buffer{})
 		} else {
+			if *debug {
+				log.Printf("Worker %d fetching from %d -> size %d\n", n, offset, size)
+			}
+
 			body, err = d.fetch(offset, size)
 			if err != nil {
 				log.Fatal(err)
@@ -168,8 +171,9 @@ func (d *download) chunkWorker(n int, in <-chan *chunk, out chan<- *chunk) {
 			d.succeeded.add(ch.size)
 		}
 
-		// TODO(mkm) check errors
-		io.Copy(f, body)
+		if _, err = io.Copy(f, body); err != nil {
+			log.Fatal(err)
+		}
 		body.Close()
 		f.Close()
 
@@ -210,7 +214,7 @@ func (d *download) chunkWriter(in <-chan *chunk) {
 				d.progress.add(n)
 
 				f.Close()
-				os.Remove(c.file)
+				//os.Remove(c.file)
 
 				outPos += c.size
 			} else {
