@@ -25,6 +25,10 @@ var (
 	debug     = flag.Bool("d", false, "debug")
 )
 
+const (
+	numRetries = 8
+)
+
 type chunk struct {
 	offset int64
 	size   int64
@@ -96,8 +100,8 @@ func (d *download) chunkFeeder(out chan<- *chunk) {
 		if off >= d.size {
 			break
 		}
-		if off+size > d.size {
-			size = off + size - d.size
+		if off+size >= d.size {
+			size = d.size - off
 		}
 		if *debug {
 			log.Printf("Enqueuing chunk %d size %d", off, size)
@@ -156,13 +160,17 @@ func (d *download) chunkWorker(n int, in <-chan *chunk, out chan<- *chunk) {
 
 		var body io.ReadCloser
 		if size < 1 {
+			if *debug {
+				log.Printf("Chunk worker %d NOT fetching chunk %d (%d), because tmp data is complete.\n", n, ch.offset, ch.size)
+			}
+
 			body = ioutil.NopCloser(&bytes.Buffer{})
 		} else {
 			if *debug {
-				log.Printf("Worker %d fetching from %d -> size %d\n", n, offset, size)
+				log.Printf("Worker %d fetching chunk %d (%d) partial from %d -> size %d\n", n, ch.offset, ch.size, offset, size)
 			}
 
-			body, err = d.fetch(offset, size)
+			body, err = d.retryFetch(offset, size)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -171,8 +179,8 @@ func (d *download) chunkWorker(n int, in <-chan *chunk, out chan<- *chunk) {
 			d.succeeded.add(ch.size)
 		}
 
-		if _, err = io.Copy(f, body); err != nil {
-			log.Fatal(err)
+		if bs, err := io.Copy(f, body); err != nil {
+			log.Fatalf("Error saving chunk %d (%d) after %d bytes: %s", ch.offset, ch.size, bs, err)
 		}
 		body.Close()
 		f.Close()
@@ -207,14 +215,15 @@ func (d *download) chunkWriter(in <-chan *chunk) {
 				if err != nil {
 					log.Fatal(err)
 				}
-				n, err := io.Copy(d.writer, f)
+
+				n, err := io.CopyN(d.writer, f, ch.size)
 				if err != nil {
-					log.Fatal(err)
+					log.Fatalf("Error merging chunk %d (%d) after %d bytes: %s", ch.offset, ch.size, n, err)
 				}
 				d.progress.add(n)
 
 				f.Close()
-				//os.Remove(c.file)
+				os.Remove(c.file)
 
 				outPos += c.size
 			} else {
@@ -331,6 +340,24 @@ func contentSize(url string) (int64, error) {
 func followRedirect(req *http.Request, via []*http.Request) error {
 	req.Header = via[0].Header
 	return nil
+}
+
+// retryFetch will retry a fetch a few times.
+func (d *download) retryFetch(from, len int64) (r io.ReadCloser, err error) {
+	t := 1 * time.Second
+	for i := 0; i < numRetries; i++ {
+		r, err = d.fetch(from, len)
+		if err == nil {
+			return
+		}
+
+		if *debug {
+			log.Printf("waiting %s, retry %d", t, i+1)
+		}
+		time.Sleep(t)
+		t *= 2
+	}
+	return
 }
 
 // fetch returns a ReadCloser with the content of a
