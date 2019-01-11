@@ -1,6 +1,6 @@
 # spget
 
-[![Build Status](https://travis-ci.org/mmikulicic/spget.png)](https://travis-ci.org/mmikulicic/spget)
+[![Build Status](https://travis-ci.org/mkmik/spget.png)](https://travis-ci.org/mkmik/spget)
 
 spget (pronounced like spaghetti) is a simple download manager that downloads a large file in parallel.
 
