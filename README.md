@@ -15,7 +15,7 @@ spget is able to resume an interrupted download. Both the output file and the pa
 ## Install
 
 ```bash
-go get github.com/mmikulicic/spget
+go get github.com/mkmik/spget
 ```
 
 ## Usage
