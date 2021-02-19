@@ -1,7 +1,5 @@
 # spget
 
-[![Build Status](https://travis-ci.org/mkmik/spget.png)](https://travis-ci.org/mkmik/spget)
-
 spget (pronounced like spaghetti) is a simple download manager that downloads a large file in parallel.
 
 Unlike other parallel downloaders this tries to be stream friendly (i.e. streamable parallel get), by splitting
